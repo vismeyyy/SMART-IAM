@@ -570,6 +570,83 @@ app.post('/api/security/auth/logout', (_req, res) => {
   return res.status(204).end();
 });
 
+// ---------------------------------------------------------------------------
+// Workspace integration (Root User / Main Admin app)
+// Demo-only, email-identified endpoints that let the separate SmartIAM
+// workspace share access requests and Security Team decision messages with
+// this API. Production must authenticate and authorize every action.
+// ---------------------------------------------------------------------------
+
+function ensureWorkspaceContact(contact) {
+  const existing = contacts.find((item) => item.email.toLowerCase() === contact.email.toLowerCase());
+  if (existing) return existing;
+  contacts.push(contact);
+  return contact;
+}
+
+app.post('/api/requests', (req, res) => {
+  const requester = typeof req.body?.requester === 'string' ? req.body.requester.trim().slice(0, 100) : '';
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const company = typeof req.body?.company === 'string' && req.body.company.trim() ? req.body.company.trim().slice(0, 120) : 'ABC Technologies';
+  const resource = typeof req.body?.resource === 'string' ? req.body.resource.trim().slice(0, 120) : '';
+  const permission = typeof req.body?.permission === 'string' ? req.body.permission.trim().slice(0, 60) : '';
+  const duration = typeof req.body?.duration === 'string' && req.body.duration.trim() ? req.body.duration.trim().slice(0, 40) : '7 days';
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 1000) : '';
+  const risk = ['Low', 'Medium', 'High'].includes(req.body?.risk) ? req.body.risk : 'Medium';
+  const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  if (!requester || !resource || !permission || !validEmail.test(email)) {
+    return res.status(400).json({ message: 'Enter your name, work email, resource, and permission.' });
+  }
+
+  const request = {
+    id: `IAM-${Date.now().toString().slice(-6)}`,
+    requester,
+    email,
+    company,
+    resource,
+    permission,
+    risk,
+    duration,
+    reason: reason || 'No additional context provided.',
+    status: 'Pending',
+    submittedAt: new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }),
+    timeAgo: 'Just now',
+  };
+  requests.unshift(request);
+
+  // Ensure contacts exist so Security Team decisions route back to this
+  // Root User and their company Main Admin.
+  ensureWorkspaceContact({ name: requester, email, role: 'Root User', company });
+  if (!contacts.some((item) => item.role === 'Main Admin' && item.company === company)) {
+    const slug = company.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    ensureWorkspaceContact({ name: `${company} Main Admin`, email: `admin@${slug || 'company'}.demo`, role: 'Main Admin', company });
+  }
+
+  notifications.unshift({
+    id: `NT-${Date.now()}`,
+    title: 'New access request',
+    message: `${requester} requested ${permission} access to ${resource}.`,
+    time: 'Just now',
+    tone: 'amber',
+    read: false,
+  });
+
+  return res.status(201).json({ request });
+});
+
+app.get('/api/requests', (req, res) => {
+  const email = typeof req.query?.email === 'string' ? req.query.email.trim().toLowerCase() : '';
+  if (!email) return res.status(400).json({ message: 'An email is required to list requests.' });
+  return res.json({ requests: requests.filter((request) => request.email?.toLowerCase() === email) });
+});
+
+app.get('/api/messages', (req, res) => {
+  const email = typeof req.query?.email === 'string' ? req.query.email.trim().toLowerCase() : '';
+  if (!email) return res.status(400).json({ message: 'An email is required to list messages.' });
+  return res.json({ messages: messages.filter((message) => message.threadWith?.toLowerCase() === email) });
+});
+
 app.use((error, _req, res, _next) => {
   console.error('Unhandled API error:', error);
   res.status(500).json({ message: 'Something went wrong. Please try again.' });

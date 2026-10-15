@@ -15,7 +15,7 @@ function EmployeeModal({ form, setForm, onSubmit, onClose }: { form: { name: str
     </div>
   </section></div>
 }
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import AuthScreen from './AuthScreen'
 import { AlertTriangle, ArrowRight, Bell, Check, ChevronRight, Clock3, Cloud, FileText, KeyRound, LayoutDashboard, LifeBuoy, LockKeyhole, MessageCircle, Moon, MoreHorizontal, Palette, Plus, Search, Send, Settings2, Shield, ShieldAlert, ShieldCheck, Sparkles, Sun, Users, X, XCircle } from 'lucide-react'
 import './App.css'
@@ -37,7 +37,7 @@ import './DarkThemeReadability.css'
 
 type Role = 'Security Team' | 'Main Admin' | 'Root User'
 type AccessState = 'Pending' | 'Approved' | 'Rejected'
-type Request = { id: string; name: string; email: string; resource: string; detail: string; permission: string; duration: string; risk: 'Low' | 'High'; status: AccessState; reason: string; comment?: string; createdAt?: string }
+type Request = { id: string; name: string; email: string; resource: string; detail: string; permission: string; duration: string; risk: 'Low' | 'High'; status: AccessState; reason: string; comment?: string; createdAt?: string; backendId?: string }
 type Employee = { name: string; email: string; job: string; active: boolean; loginId?: string; organization?: string }
 type UserProfile = { name: string; email: string; jobTitle: string; phone: string; employeeId: string; country: string; organization: string; loginId: string; photo: string }
 type ChatMessage = { id: string; threadId: string; sender: string; senderRole: Role; text: string; sentAt: string }
@@ -130,6 +130,61 @@ export default function SmartIAM() {
       ? [{ id: 'security-team', name: 'Security Team', detail: 'Access reviews & help', role: 'Security Team', initials: 'ST' }]
       : [{ id: 'main-admin', name: 'Main Admin', detail: profile.organization, role: 'Main Admin', initials: profile.name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase() }, ...employees.filter((employee) => employee.active).map((employee) => ({ id: employee.email, name: employee.name, detail: employee.job, role: 'Root User' as Role, initials: employee.name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase() }))]
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2600) }
+  // Share a new access request with the backend so the Security Team portal
+  // (a separate site) can review it. Best-effort: the local demo keeps working
+  // even if the API is offline.
+  const pushRequestToBackend = (item: Request) => {
+    fetch('/api/requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requester: item.name, email: item.email, company: profile.organization, resource: item.resource, permission: item.permission, duration: item.duration, reason: item.reason, risk: item.risk }) })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => { if (data?.request) setRequests((current) => { const next = current.map((entry) => entry.id === item.id ? { ...entry, backendId: data.request.id } : entry); localStorage.setItem('smartiam-requests', JSON.stringify(next)); return next }) })
+      .catch(() => {})
+  }
+  // Poll the backend for live request status and Security Team decision
+  // messages addressed to the signed-in user, and merge them into this demo.
+  useEffect(() => {
+    if (!authenticated) return
+    let active = true
+    const sync = async () => {
+      const email = profile.email
+      if (!email) return
+      try {
+        const [requestResponse, messageResponse] = await Promise.all([
+          fetch(`/api/requests?email=${encodeURIComponent(email)}`),
+          fetch(`/api/messages?email=${encodeURIComponent(email)}`),
+        ])
+        if (!active) return
+        if (requestResponse.ok) {
+          const data = await requestResponse.json() as { requests?: Array<{ id: string; email?: string; resource?: string; permission?: string; reason?: string; status?: string; comment?: string }> }
+          const remote = Array.isArray(data.requests) ? data.requests : []
+          setRequests((current) => {
+            let changed = false
+            const next = current.map((item) => {
+              const match = remote.find((entry) => item.backendId ? entry.id === item.backendId : entry.email?.toLowerCase() === item.email.toLowerCase() && entry.resource === item.resource && entry.permission === item.permission && (entry.reason || '') === (item.reason || ''))
+              if (!match || match.status === item.status) return item
+              changed = true
+              return { ...item, backendId: match.id, status: match.status as AccessState, comment: match.comment || item.comment }
+            })
+            return changed ? next : current
+          })
+        }
+        if (messageResponse.ok) {
+          const data = await messageResponse.json() as { messages?: Array<{ id: string; fromRole?: string; fromName?: string; subject?: string; body?: string; time?: string }> }
+          const remote = Array.isArray(data.messages) ? data.messages : []
+          setChatMessages((current) => {
+            const seen = new Set(current.map((entry) => entry.id))
+            const additions = remote.filter((entry) => entry.fromRole === 'Security Team' && !seen.has(`backend-${entry.id}`)).map((entry) => ({ id: `backend-${entry.id}`, threadId: 'security-team', sender: entry.fromName || 'Security Team', senderRole: 'Security Team' as Role, text: `${entry.subject ? `${entry.subject} — ` : ''}${entry.body}`, sentAt: entry.time || 'Just now' }))
+            if (!additions.length) return current
+            const next = [...current, ...additions]
+            localStorage.setItem('smartiam-messages', JSON.stringify(next))
+            return next
+          })
+        }
+      } catch { /* backend offline: local demo continues */ }
+    }
+    sync()
+    const timer = window.setInterval(sync, 6000)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [authenticated, profile.email])
   const changeTheme = (nextTheme: DashboardTheme) => { setDashboardTheme(nextTheme); localStorage.setItem('smartiam-theme', nextTheme) }
   const changeTextScale = (nextScale: number) => { setTextScale(nextScale); localStorage.setItem('smartiam-text-scale', String(nextScale)) }
   const move = (destination: string) => { setPage(destination); setSelected(null) }
@@ -173,11 +228,11 @@ export default function SmartIAM() {
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const item: Request = { id: `REQ-${2085 + requests.length - initial.length}`, name: profile.name, email: profile.email, resource: form.resource, detail: form.resource, permission: form.permission, duration: form.duration, risk: form.permission === 'Read only' ? 'Low' : 'High', status: 'Pending', reason: form.reason, createdAt: new Date().toISOString() }
-    save([item, ...requests]); setModal(false); move(role === 'Root User' ? 'Request history' : 'Requests'); notify('Access request sent for security review')
+    save([item, ...requests]); setModal(false); move(role === 'Root User' ? 'Request history' : 'Requests'); notify('Access request sent for security review'); pushRequestToBackend(item)
   }
   const submitWizard = (values: { service: string; operation: string; environment: string; duration: string; reason: string; risk: 'Low' | 'High' }) => {
     const item: Request = { id: `REQ-${2085 + requests.length - initial.length}`, name: profile.name, email: profile.email, resource: values.service, detail: `${values.service} · ${values.environment}`, permission: values.operation, duration: values.duration, risk: values.risk, status: 'Pending', reason: values.reason, createdAt: new Date().toISOString() }
-    save([item, ...requests]); setWizardOpen(false); move('Request history'); notify('Least-privilege access request sent for review')
+    save([item, ...requests]); setWizardOpen(false); move('Request history'); notify('Least-privilege access request sent for review'); pushRequestToBackend(item)
   }
   const addEmployee = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
